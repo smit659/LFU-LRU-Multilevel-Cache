@@ -8,6 +8,12 @@ import cache.strategy.CacheStrategy;
  * <p>On a cache miss, L1 fetches the value from the next level and
  * <b>promotes</b> it into L1 for faster subsequent access (write-on-read).</p>
  *
+ * <h3>Thread Safety</h3>
+ * <p>The local strategy is accessed under this level's lock. The lock is
+ * <b>released</b> before fetching from downstream to avoid holding nested
+ * locks during reads (improves concurrency). Promotion re-acquires the lock
+ * via {@link AbstractCache#put}.</p>
+ *
  * @param <K> the type of keys
  * @param <V> the type of values
  */
@@ -20,24 +26,31 @@ public class L1Cache<K, V> extends AbstractCache<K, V> {
     /**
      * Retrieves the value for the given key.
      * <ol>
-     *   <li>Checks the local cache strategy first.</li>
-     *   <li>On miss, delegates to the next cache level.</li>
+     *   <li>Checks the local cache strategy first (under lock).</li>
+     *   <li>On miss, releases the lock and delegates to the next cache level.</li>
      *   <li>If found downstream, promotes the entry into this level.</li>
      * </ol>
      */
     @Override
     public V get(K key) {
-        V value = cacheStrategy.get(key);
-        if (value != null) {
-            return value;
+        lock.lock();
+        try {
+            V value = cacheStrategy.get(key);
+            if (value != null) {
+                return value;
+            }
+        } finally {
+            lock.unlock();
         }
 
+        // Fetch downstream without holding this level's lock
         V downstream = nextCache != null ? nextCache.get(key) : null;
         if (downstream != null) {
-            put(key, downstream);
+            put(key, downstream); // re-acquires lock via AbstractCache.put()
             return downstream;
         }
 
         return null;
     }
 }
+
